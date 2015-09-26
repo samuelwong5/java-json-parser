@@ -1,6 +1,8 @@
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
-import java.util.Stack;
 
 public class JsonParser {
 	
@@ -11,137 +13,118 @@ public class JsonParser {
 	 * Usage: JsonParser.parse(String json)
 	 * 
 	 * @param json - the String representation of a JSON object
-	 * @return JSONTreeElement representation of the JSON object.
-	 * @throws Exception - if the input String is invalid.
+	 * @return JsonElement representation of the JSON object
+	 * @throws IllegalArgumentException if the input is malformed
 	 */
-	public static JsonTreeElement parse(String json) throws Exception {
-		// Initialize stack 
-		Stack<JsonTreeElement> stack = new Stack<JsonTreeElement>();
-		
-		// Initialize top-level JSONTreeElement
-		JsonTreeElement head = new JsonTreeElement();
-		stack.push(head);
-		
-		// Pointer to the current-level JSONTreeElement
-		JsonTreeElement curr = head;
-		
-		// Holding variable for attribute tags
-		String name = null;
-		
-		// Recursion depth of current JSONTreeElement
-		int level = 0;
-		
-		for (int i = 0; i < json.length(); i++) {
-			if (json.charAt(i) == '{') {
-				if (level == 0) 
-					level++;
-				else {
-					if (name == null) // Missing attribute tag before embedded JSON
-						throw new Exception("Invalid input - missing attribute tag");
-					
-					// Add new JSONTreeElement as a child of current pointer
-					// and then set the new element as current.
-					JsonTreeElement hold = new JsonTreeElement();
-					curr.addChild(name, hold);
-					stack.push(curr);
-					name = null;
-					curr = hold;
-				}
-			} else if (json.charAt(i) == '}') {
-			    curr = stack.pop();
-			} else if (json.charAt(i) == '"') {
-				if (name == null) { // Attribute string
-					name = "";
-					i++;
-					while (json.charAt(i) != '"') {
-						name += json.charAt(i);
-						i++;
-					}
-				} else {  // Leaf value string
-					String value = "";
-					i++;
-					while (json.charAt(i) != '"') {
-						value += json.charAt(i);
-						i++;
-					}
-					JsonTreeElement leaf = new JsonTreeElement();
-					leaf.setValue(value);
-					curr.addChild(name, leaf);
-					name = null;
-				}
-			} 
-		}
-		
-		return head;
+	public JsonElement parse(String json) throws IllegalArgumentException {
+		JsonTokenStream stream = new JsonTokenStream(json);
+		JsonElement j = parseJson(stream);
+		return j;
 	}
 	
-	private static class JsonTreeElement {
-		private JsonTreeElementState state = JsonTreeElementState.NEW;
-		private String value = null;
-		private Map<String, JsonTreeElement> children;
-
-		/** 
-		 * Adds a children JSONTreeElement to this
-		 * JSONTreeElemetn. Will also set the state flag
-		 * to PARENT if not already set. Does nothing if
-		 * the state flag is set to LEAF.
-		 * 
-		 * @param childName - the attribute tag of the child
-		 * @param childElem - the child JSONTreeElement object
-		 */
-		public void addChild(String childName, JsonTreeElement childElem) {
-			if (state == JsonTreeElementState.LEAF) {
-				return;
-			} else if (state == JsonTreeElementState.NEW){
-				this.state = JsonTreeElementState.PARENT;
-				this.children = new HashMap<String, JsonTreeElement>();
-				this.children.put(childName, childElem);
+	
+	protected ArrayJsonElement parseArray(JsonTokenStream stream) throws IllegalArgumentException {
+		stream.skipWhiteSpace();
+		stream.match('[');
+		ArrayJsonElement elem = new ArrayJsonElement();
+		if (stream.peekToken().getId() == JsonToken.BRACKET_SQUARE_CLOSE) {
+			stream.nextToken();
+			return elem;
+		}
+		while (true) {
+			stream.skipWhiteSpace();
+			switch (stream.peekToken().getId()) {
+			case JsonToken.BRACKET_SQUARE_OPEN:
+				elem.add(parseArray(stream));
+				break;
+			case JsonToken.BRACKET_CURLY_OPEN:
+				elem.add(parseJson(stream));
+				break;
+			case JsonToken.DOUBLE_QUOTE:
+				elem.add(new LeafJsonElement(parseString(stream)));
+				break;
+			default:
+			    throw new IllegalArgumentException("Malformed JSON at index " + stream.getIndex());
+			}
+			stream.skipWhiteSpace();
+			if (stream.peekToken().getId() == JsonToken.BRACKET_SQUARE_CLOSE) {
+				stream.nextToken();
+				return elem;
 			} else {
-				this.children.put(childName, childElem);
+				stream.match(',');
+			}
+		}
+	}
+	
+	
+	protected JsonElement parseJson(JsonTokenStream stream) throws IllegalArgumentException {
+	    stream.skipWhiteSpace();
+		stream.match('{');
+		JsonElement elem = new JsonElement();
+		if (stream.peekToken().getId() == JsonToken.BRACKET_CURLY_CLOSE) {
+			stream.nextToken();
+			return elem;
+		}
+		while (true) {
+			stream.skipWhiteSpace();
+			String attribute_id = parseString(stream);
+			stream.match(':');
+			stream.skipWhiteSpace();
+			switch (stream.peekToken().getId()) {
+			case JsonToken.BRACKET_SQUARE_OPEN:
+				elem.add(attribute_id, parseArray(stream));
+				break;
+			case JsonToken.BRACKET_CURLY_OPEN:
+				elem.add(attribute_id, parseJson(stream));
+				break;
+			case JsonToken.DOUBLE_QUOTE:
+				elem.add(attribute_id, new LeafJsonElement(parseString(stream)));
+				break;
+			default:
+			    throw new IllegalArgumentException("Malformed JSON at index " + stream.getIndex());
+			}
+			stream.skipWhiteSpace();
+			if (stream.peekToken().getId() == JsonToken.BRACKET_CURLY_CLOSE) {
+				stream.nextToken();
+				return elem;
+			} else {
+				stream.match(',');
 			}
 		}
 		
+	}
+	
+	protected String parseString(JsonTokenStream stream) throws IllegalArgumentException {
+		stream.skipWhiteSpace();
+		String s = "";
+		stream.match('"');
+		JsonToken t = stream.nextToken();
+		while (t.getId() != JsonToken.DOUBLE_QUOTE) {
+			s += t.getChar();
+			t = stream.nextToken();
+		}
+		stream.skipWhiteSpace();
+		return s;
+	}
+	
+	
+	private abstract class AbstractJsonElement {
 		
 		/**
-		 * Sets the value of this JSONTreeElement to 
-		 * the input String value. Will also set the 
-		 * state flag to LEAF. Does nothing if this 
-		 * element has a JSONTreeElement child(ren).
+		 * Returns the String value of LeafJsonElement
+		 * contained in its _value_ member. If it is not
+		 * a LeafJsonElement it should return the String
+		 * representation of the JsonElement by calling
+		 * the toString() method.
 		 * 
-		 * @param value - the value for this LEAF element
+		 * @return the String value of the element
 		 */
-		public void setValue(String value) {
-			if (state == JsonTreeElementState.PARENT) {
-				return;
-			} else if (state == JsonTreeElementState.NEW){
-				this.state = JsonTreeElementState.LEAF;
-			    this.value = value;
-			} else {
-				this.value = value;
-			}
-		}
-		
-		
-		/**
-		 * Returns the value of the JSONTreeElement. 
-		 * The value will be null if the JSONTreeElement
-		 * is not a LEAF element.
-		 * 
-		 * Sample usage:
-		 * Given parser input {"status": "success"} that 
-		 * returned variable elem, elem.get() will return
-		 * the string "success".
-		 * 
-		 * @return the value of the LEAF element.
-		 */
-		public String get() {
-		    return value;	
-		}
-		
+		abstract String getValue();
 		
 		/** 
-		 * Returns the JSONTreeElement corresponding to 
-		 * give atribute value. 
+		 * Returns the AbstractJsonElement corresponding to 
+		 * give attribute value of a JsonElement. If it is 
+		 * not a JsonElement, it will return null.
 		 * 
 		 * Sample usage:
 		 * Given parser input: 
@@ -149,58 +132,222 @@ public class JsonParser {
 		 * that returned variable elem, 
 		 * elem.get("a").get("b").get("c").get("d") will
 		 * return the JSONTreeElement with value "e".
-		 * The toString() method and the get() method will 
-		 * return "e".
+		 * The getValue() method will then return "e".
 		 * 
 		 * @param attr - the attribute tag
-		 * @return the corresponding JSONTreeElement
+		 * @return the corresponding AbstractJsonElement
 		 */
-		public JsonTreeElement get(String attr) {
-			if (state == JsonTreeElementState.PARENT) 
-     			return children.get(attr);
+		abstract AbstractJsonElement get(String attr);
+	}
+	
+	
+	private class ArrayJsonElement extends AbstractJsonElement {
+		private List<AbstractJsonElement> children;
+		
+		public ArrayJsonElement() {
+			this.children = new ArrayList<AbstractJsonElement>();
+		}
+		
+		public void add(AbstractJsonElement child) {
+			this.children.add(child);
+		}
+		
+		public List<AbstractJsonElement> getChildren() {
+			return children;
+		}
+		
+		@Override
+		public String getValue() {
+			return toString();
+		}
+		
+		@Override 
+		public AbstractJsonElement get(String attr) {
 			return null;
 		}
 		
-		
-		/**
-		 * Used by the toString method while building the 
-		 * String representation of the JSON tree. 
-		 * 
-		 * @return whether the JsonTreeElement is a LEAF
-		 */
-		public boolean isLeaf() {
-			return state == JsonTreeElementState.LEAF;
-		}
-		
-		
-		/**
-		 * Overrided toString method that returns the String
-		 * representation of a JSON object.
-		 */
 		@Override
 		public String toString() {
-			if (state == JsonTreeElementState.LEAF) {
-				return value;
-			} else if (state == JsonTreeElementState.NEW) {
-				return "{}";
-			} else {
-				StringBuilder sb = new StringBuilder();
-				for (String key : children.keySet()) {
-					JsonTreeElement child = children.get(key);
-					if (child.isLeaf()) 
-						sb.append("\"" + key + "\": \"" + child.get() + "\", ");
-					else
-					    sb.append("\"" + key + "\": " + child.toString() + ", ");
-				}
-				return "{" + sb.substring(0, sb.length() - 2) + "}";
+			if (children.size() == 0)
+				return "[]";
+			StringBuilder sb = new StringBuilder();
+			sb.append("[");
+			for (int i = 0; i < children.size() - 1; i++) {
+				sb.append(children.get(i).toString() + ", ");
 			}
+			sb.append(children.get(children.size() - 1).toString());
+			sb.append("]");
+			return sb.toString();
 		}
 	}
 	
 	
-	private static enum JsonTreeElementState {
-		NEW,      // Empty {} 
-		LEAF,     // Leaf value
-		PARENT;   // JSON value 
+	private class JsonElement extends AbstractJsonElement {
+		private Map<String, AbstractJsonElement> children;
+		
+		public JsonElement() {
+			this.children = new HashMap<String, AbstractJsonElement>();
+		}
+		
+		public void add(String attribute, AbstractJsonElement child) {
+			this.children.put(attribute, child);
+		}
+		
+		@Override
+		public String getValue() {
+			return toString();
+		}
+		
+		@Override 
+		public AbstractJsonElement get(String attr) {
+			return children.get(attr);
+		}
+		
+		@Override
+		public String toString() {
+			if (children.size() == 0) {
+				return "{}";
+			}
+			StringBuilder sb = new StringBuilder();
+			sb.append("{");
+			Iterator<String> i = children.keySet().iterator();
+			while (i.hasNext()) {
+			    String key = i.next();
+			    sb.append("\"" + key + "\":" + children.get(key).toString());
+			    if (i.hasNext())
+			    	sb.append(", ");
+			}
+			sb.append("}");
+			return sb.toString();
+		}
+	}
+	
+	
+	private class LeafJsonElement extends AbstractJsonElement {
+		private String value;
+		
+		public LeafJsonElement(String value) {
+			this.value = value;
+		}
+		
+		@Override
+		public String getValue() {
+			return this.value;
+		}
+		
+		@Override 
+		public AbstractJsonElement get(String attr) {
+			return null;
+		}
+		
+		@Override
+		public String toString() {
+			return "\"" + this.value + "\"";
+		}
+	}
+	
+	
+	private class JsonTokenStream {
+		private List<JsonToken> tokens;
+		private int index;
+		
+		public JsonTokenStream(String json) {
+			this.tokens = new ArrayList<JsonToken>();
+			for (char c : json.toCharArray()) {
+			    this.tokens.add(new JsonToken(c));
+			}
+			this.index = 0;
+		}
+		
+		public int getIndex() {
+			return index;
+		}
+		
+		public JsonToken peekToken() {
+			return index >= tokens.size() ? null : tokens.get(index);
+		}
+		
+		public JsonToken nextToken() {
+			return index >= tokens.size() ? null : tokens.get(index++);
+		}
+		
+		public JsonToken getLastToken() {
+			return tokens.get(index - 1 > -1 ? index - 1 : 0);
+		}
+		
+		public void skipWhiteSpace() {
+			while (tokens.get(index).tokenId == JsonToken.WHITESPACE)
+				index++;
+		}
+		
+		public void match(char c) throws IllegalArgumentException {
+			JsonToken t = nextToken();
+			if (t.getChar() != c) 
+				throw new IllegalArgumentException("Malformed JSON at index " + getIndex()
+				                                       + "\nExpected: '" + c
+				                                       + "'\nGot: '" + t.getChar() + "'");
+		}
+		
+	}
+	
+	
+	private class JsonToken {
+		static final int BRACKET_CURLY_OPEN   = 0;
+		static final int BRACKET_CURLY_CLOSE  = 1;
+		static final int BRACKET_SQUARE_OPEN  = 2;
+		static final int BRACKET_SQUARE_CLOSE = 3;
+		static final int DOUBLE_QUOTE         = 4;
+		static final int COMMA                = 5;
+		static final int COLON                = 6;
+		static final int WHITESPACE           = 7;
+		static final int ID                   = 8;
+		
+		private int tokenId;
+		private char tokenChar;
+		
+		JsonToken(char c) {
+			switch (c) {
+			case '{':
+				this.tokenId = BRACKET_CURLY_OPEN;
+				break;
+			case '}':
+				this.tokenId = BRACKET_CURLY_CLOSE;
+				break;
+			case '[':
+				this.tokenId = BRACKET_SQUARE_OPEN;
+				break;
+			case ']':
+				this.tokenId = BRACKET_SQUARE_CLOSE;
+				break;
+			case '"':
+				this.tokenId = DOUBLE_QUOTE;
+				break;
+			case ',':
+				this.tokenId = COMMA;
+				break;
+			case ':':
+				this.tokenId = COLON;
+				break;
+			case ' ':
+				this.tokenId = WHITESPACE;
+				break;
+			case '\t':
+				this.tokenId = WHITESPACE;
+				break;
+			case '\n':
+				this.tokenId = WHITESPACE;
+				break;
+			}
+			this.tokenChar = c;
+		}
+		
+		public int getId() {
+			return tokenId;
+		}
+		
+		public char getChar() {
+			return tokenChar;
+		}
+		
 	}
 }
